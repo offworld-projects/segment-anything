@@ -76,8 +76,8 @@ class ImageSegmentation:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.load_model(model_name)
 
-        # mask color scheme of 21 classes in each color
-        self.palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 20 - 1])
+        # mask color scheme of n classes in each color
+        self.create_color_palette(num_classes=20)
 
     def get_device(self, device=0):
         # Function creates a streaming object to read the stream frame by frame.
@@ -95,6 +95,35 @@ class ImageSegmentation:
         sam.to(device=device)
         self.mask_generator = SamAutomaticMaskGenerator(sam)
 
+    
+    def segment_image(self, img_np, segmentation_mask):
+        """
+        returns segmented image 
+        
+        img_np (numpy array): numpy array of entire image
+        segmentation_mask: numpy array of binarys for segmented mask
+        
+        """
+        segmented_img_np = np.zeros_like(img_np)
+        segmented_img_np[segmentation_mask] = img_np[segmentation_mask]
+        return Image.fromarray(segmented_img_np)
+
+    def get_indices_of_values_above_threshold(self, values, threshold):
+        """
+        get indicies of bounding box crops that are above cosine distance threshold for prompt
+        
+        values (list): list of cosine distances betweeen cropped boxes and text
+        threshold (float): cosine distance threshold to count as class
+        """
+        return [i for i, v in enumerate(values) if v > threshold]
+
+    def create_color_palette(self, num_classes):
+        # Generate a 3-element color palette tuple
+        self.color_palette = np.zeros((num_classes, 3), dtype=np.uint8)
+        self.color_palette[:, 0] = np.linspace(0, 255, num_classes, dtype=np.uint8)
+        self.color_palette[:, 1] = np.linspace(0, 255, num_classes, dtype=np.uint8)
+        self.color_palette[:, 2] = np.linspace(0, 255, num_classes, dtype=np.uint8)
+         
     def convert_box_xywh_to_xyxy(self, box):
         """
         convert bounding box from SAM format to x1,y1,x2,y2
@@ -109,89 +138,98 @@ class ImageSegmentation:
         y2 = box[1] + box[3]
         return [x1, y1, x2, y2]
 
-    def get_overlay_img(self, input_image, masks, classes, obj_threshold=.1):
+    def get_bbox_proposal(self, masks):
         """
-        get image numpy array overlayed with detections
+        get bbox proposal from sam automatic masks predictor, and crop these region out
+        """
+        cropped_boxes =[]
+        for mask in masks:
+            cropped_box = self.segment_image(self.cur_img_np, mask["segmentation"]).crop(self.convert_box_xywh_to_xyxy(mask["bbox"]))
+            cropped_boxes.append(cropped_box)
+
+        return cropped_boxes
+
+    def classify_masks(self, input_image, masks, classes, obj_threshold=.27):
+        """
+        masks classification with clip model
         
         masks (list): list of SAM mask dictionaries
         classes (list): list of attempted detected classes
         
         return (numpy array): image numpy array with overlays
         """
-        # TODO maybe set masks instead of pass in?
-        # TODO break this into multiple functions
-        FONT_SCALE = 2e-3
-        
-        # Cut out all masks
-        cropped_boxes = []
+        # cut the mask bbox out
+        cropped_boxes = self.get_bbox_proposal(masks)
+        multi_class_cropped_boxes_score = np.zeros((len(classes), len(cropped_boxes)))
 
-        for mask in masks:
-            cropped_boxes.append(self.segment_image(self.cur_img_np, mask["segmentation"]).crop(self.convert_box_xywh_to_xyxy(mask["bbox"])))
-
-        class_prompts = []
-        for cls in classes: 
-            class_prompts.append(f"a photo of a {cls}")   
-            
+        class_prompts = [f"a photo of a {cls}" for cls in classes]
         img_og = input_image
 
         print(f"number of crop boxes {len(cropped_boxes)}")
         print(f"number of classes {len(classes)}")
-            
+
         for idx, class_prompt in enumerate(class_prompts):
+            scores = np.array(self.object_detection_model.cosine_dist_img_txt(cropped_boxes, class_prompt))
+            filtered_scores = np.zeros_like(scores)
+            filtered_scores[scores > obj_threshold] = scores[scores > obj_threshold]   
+            multi_class_cropped_boxes_score[idx] = filtered_scores
 
-            scores = self.object_detection_model.cosine_dist_img_txt(cropped_boxes, class_prompt)
-            indices = self.get_indices_of_values_above_threshold(scores, obj_threshold)
+        img_og = self.image_overlay(classes, img_og, multi_class_cropped_boxes_score, masks)
 
-            segmentation_masks = []
-            polygons = []
+        return img_og
 
-            for seg_idx in indices:
-                cntrs, _ = cv2.findContours(masks[seg_idx]["segmentation"].astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)
-                polygons.append(cntrs)
-                segmentation_mask_image = Image.fromarray(masks[seg_idx]["segmentation"].astype('uint8') * 255)
-                segmentation_masks.append(segmentation_mask_image)
+    def image_overlay(self, classes, img_og, multi_class_cropped_boxes_score, masks):
 
-            height, width, _ = img_og.shape
+        FONT_SCALE = 5e-3
+        height, width, _ = img_og.shape
+        font_scale = min(width, height) * FONT_SCALE
 
-            font_scale = min(width, height) * FONT_SCALE
+        # one class for one mask
+        indices = np.argmax(multi_class_cropped_boxes_score, axis=0)
 
-            for j in range(len(polygons)):
-                poly = polygons[j]
-                img_og = cv2.polylines(img=img_og, pts=poly, isClosed=True, color=(0, 255, 0), thickness=3)
+        # get the invalid class with 0 value
+        invalid_class_idx = np.where(~multi_class_cropped_boxes_score.any(axis=0))[0]
+        indices[invalid_class_idx] = -1
 
-                label = f"{classes[idx]}__{round(float(scores[indices[j]]), 3)}"
+        for mask_idx, class_idx in enumerate(indices):
+            if class_idx == -1: continue
+            cntrs, _ = cv2.findContours(masks[mask_idx]["segmentation"].astype('uint8'), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)
+            img_og = cv2.polylines(img=img_og, pts=cntrs, isClosed=True, color=(255, 165, 0), thickness=1)
+            label = f"{classes[class_idx]}: {round(float(multi_class_cropped_boxes_score[class_idx][mask_idx]), 2)}"
+            self.put_label_text(img_og, label, cntrs, width, height, font_scale)
 
-                max_poly_idx = 0
-                max_poly_area = -1
-                for i in range(len(poly)):
-                    area = cv2.contourArea(poly[i])
-                    if area > max_poly_area:
-                       max_poly_idx = i
-                       max_poly_area = area
+        return img_og
 
-                M = cv2.moments(poly[max_poly_idx])
-                if M['m00'] == 0:
-                    center_full_x = 0
-                    center_full_y = 0
-                else:
-                    center_full_x = M['m10'] / M['m00']
-                    center_full_y = M['m01'] / M['m00']
-                    
-                width = poly[i][:,:,1].max() - poly[i][:,:,1].min()  # TODO check if hight or width 
-            
-                font_scale = self.get_optimal_font_scale(label, width)
+    def put_label_text(self, img_og, label, poly, width, height, font_scale):
+        max_poly_idx = 0
+        max_poly_area = -1
+        for i in range(len(poly)):
+            area = cv2.contourArea(poly[i])
+            if area > max_poly_area:
+               max_poly_idx = i
+               max_poly_area = area
 
-                cv2.putText(
+        M = cv2.moments(poly[max_poly_idx])
+        if M['m00'] == 0:
+            center_full_x = 0
+            center_full_y = 0
+        else:
+            center_full_x = M['m10'] / M['m00']
+            center_full_y = M['m01'] / M['m00']
+
+        width = poly[i][:,:,1].max() - poly[i][:,:,1].min()  
+
+        font_scale = self.get_optimal_font_scale(label, width)
+
+        cv2.putText(
                     img_og,
                     label,
                     org=(int(center_full_x), int(center_full_y)),
                     fontFace=0,
                     fontScale=font_scale,
-                    color=(255, 255, 255),
-                    thickness=2
+                    color=(255, 165, 0),
+                    thickness=1
                 )
-
-        return img_og
 
     def get_optimal_font_scale(self, text, width):
         """
@@ -202,43 +240,17 @@ class ImageSegmentation:
         
         return (float): optimal font scale size
         """
-        for scale in reversed(range(0, 60, 1)):
+        for scale in reversed(range(60)):
             textSize = cv2.getTextSize(text, fontFace=cv2.FONT_HERSHEY_DUPLEX, fontScale=scale/10, thickness=1)
             new_width = textSize[0][0]
             if (new_width <= width):
                 return scale/10
         return 1
 
-
-    def segment_image(self, img_np, segmentation_mask):
-        """
-        returns segmented image 
-        
-        img_np (numpy array): numpy array of entire image
-        segmentation_mask: numpy array of binarys for segmented mask
-        
-        """
-        segmented_img_np = np.zeros_like(img_np)
-        segmented_img_np[segmentation_mask] = img_np[segmentation_mask]
-        segmented_image = Image.fromarray(segmented_img_np)  # pixels black but segment
-        return segmented_image
-
-    def get_indices_of_values_above_threshold(self, values, threshold):
-        """
-        get indicies of bounding box crops that are above cosine distance threshold for prompt
-        
-        values (list): list of cosine distances betweeen cropped boxes and text
-        threshold (float): cosine distance threshold to count as class
-        """
-        return [i for i, v in enumerate(values) if v > threshold]
-
-
-    def inference(self, frame, stability_score_threshold=.98, predicted_iou_threshold=.9):
+    def inference(self, frame, stability_score_threshold=.95, predicted_iou_threshold=.95):
 
         self.cur_img_np = np.asarray(frame)
-        
         masks = self.mask_generator.generate(frame)
-
         og_masks = masks.copy()
 
         print(f"number of masks before filter {len(masks)}")
@@ -264,6 +276,8 @@ class ImageSegmentation:
         fps = 0
         tfc = int(player.get(cv2.CAP_PROP_FRAME_COUNT))
         tfcc = 0
+        classes = ["monitor", "desk", "chair", "keyboard", "cup", "person"]
+        print(f'object classes {classes}')
         while True:
             fc += 1
             start_time = time.time()
@@ -281,8 +295,7 @@ class ImageSegmentation:
             # out_frame = cv2.cvtColor(out_frame, cv2.COLOR_RGBA2BGR)
 
             # overlay the input image with segmentation masks
-            classes = ["monitor", "desk", "chair", "keyboard"]
-            out_frame = self.get_overlay_img(input_frame, out_frame, classes)
+            out_frame = self.classify_masks(input_frame, out_frame, classes)
             
             # convert PIL image back to CV2 image
             # out_frame = cv2.cvtColor(np.asarray(out_frame), cv2.COLOR_RGB2BGR)
