@@ -1,74 +1,78 @@
 
 import os
-import sys
-import torch
 import numpy as np
-sys.path.append("..")
-from segment_anything import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 
 import cv2
 import argparse
 import matplotlib; matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-def show_anns(anns):
-    if len(anns) == 0:
-        return
-    sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
-    ax = plt.gca()
-    ax.set_autoscale_on(False)
+import sys
+sys.path.append("..")
+from scripts.utils import *
 
-    img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
-    img[:,:,3] = 0
-    for ann in sorted_anns:
-        m = ann['segmentation']
-        color_mask = np.concatenate([np.random.random(3), [0.35]])
-        img[m] = color_mask
-    ax.imshow(img)
+class ImageSegmentationFolder:
+    """
+    The class performs generic image segentation from a folder.
+    It uses segment anything pretrained model to make inferences and opencv2 to manage frames.
+    Included Features:
+    1. Reading and writing of video file using  Opencv2
+    2. Using pretrained model to make inferences on frames.
+    3. Use the inferences to plot masks overlay with frames.
+    """
+    def __init__(self, model_type, image_folder_path):
+        # initialize segmentation model SAM
+        self.sam = ImageSegmentation(model_type=model_type)
+        self.image_folder_path = image_folder_path
+        self.load_images()
 
-def load_images(image_folder_path):
-    images = []
-    for filename in os.listdir(image_folder_path):
-        img = cv2.imread(os.path.join(image_folder_path,filename))
-        if img is not None:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            images.append(img)
-    return images
+    def get_device(self, device=0):
+        # Function creates a streaming object to read the stream frame by frame.
+        # return:  OpenCV object to stream video frame by frame.
+        cap = cv2.VideoCapture(device)
+        assert cap is not None
+        return cap
 
-def load_model(sam_checkpoint):
+    def load_images(self):
+        self.images = []
+        for filename in os.listdir(self.image_folder_path):
+            img = cv2.imread(os.path.join(self.image_folder_path,filename))
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                self.images.append(img)
 
-    model_type = "vit_h"
-    device = "cuda"
+    def __call__(self):
 
-    sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-    sam.to(device=device)
-    mask_generator = SamAutomaticMaskGenerator(sam)
+        classes = ["monitor", "keyboard", "cup", "person", "chair", "backpack", "bicycle"]
+        print(f'object classes {classes}')
 
-    return mask_generator
+        output_path = "../out"
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
 
-def inference(mask_generator, image_list):
+        for idx, frame in enumerate(self.images):
+            input_frame = copy.deepcopy(frame)
+            # Convert from OpenCV's BGR format to PyTorch's RGB format
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+            out_frame = self.sam.inference(frame)
 
-    for image in image_list:
-        masks = mask_generator.generate(image)
-        print(len(masks))
-        print(masks[0].keys())
-        plt.figure(figsize=(20,20))
-        plt.imshow(image)
-        show_anns(masks)
-        plt.axis('off')
-        plt.show()
+            # overlay the input image with segmentation masks
+            out_frame = self.sam.classify_masks(input_frame, out_frame, classes)
+
+            # convert the color channel back to RGB
+            out_frame = cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB) 
+            cv2.imwrite(f'../out/image_{idx}.jpg', out_frame)
+
 
 def main(args):
     print(args)
-
-    mask_generator = load_model(sam_checkpoint=args.model_name)
-    images = load_images(image_folder_path=args.image_folder)
-    inference(mask_generator, images)
+    ImageSegmentor = ImageSegmentationFolder(args.model_type, args.image_folder)
+    ImageSegmentor()
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='arguments for testing deeplabv3')
-    parser.add_argument('--model_name', type=str, default='../checkpoints/sam_vit_h_4b8939.pth')
-    parser.add_argument('--image_folder', type=str, default='/home/felix/repos/low_light_image_enhancer/img')
+    parser = argparse.ArgumentParser(description='arguments for testing sam')
+    parser.add_argument('--model_type', type=str, default='vit_b')
+    parser.add_argument('--image_folder', type=str, default='/home/felix/Pictures/Webcam')
     args = parser.parse_args()
     main(args)
 
