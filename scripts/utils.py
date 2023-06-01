@@ -248,7 +248,7 @@ class ImageSegmentation:
                 return scale/10
         return 1
 
-    def inference(self, frame, stability_score_threshold=.9, predicted_iou_threshold=.9):
+    def inference(self, frame, stability_score_threshold=.8, predicted_iou_threshold=.8):
 
         self.cur_img_np = np.asarray(frame)
         masks = self.mask_generator.generate(frame)
