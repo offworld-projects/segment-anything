@@ -77,8 +77,7 @@ class ImageSegmentation:
 
     def inference(self, frame):
         masks = self.mask_generator.generate(frame)
-        out_frame  = self.show_anns(masks)
-        return out_frame 
+        return self.show_anns(masks) 
        
     def __call__(self):
         player = self.get_device(self.streaming_device) # create streaming service for application

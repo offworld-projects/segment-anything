@@ -14,7 +14,7 @@ from scripts.utils import *
 class ImageSegmentationFolder:
     """
     The class performs generic image segentation from a folder.
-    It uses segment anything pretrained model to make inferences and opencv2 to manage frames.
+    It uses segment anything model pretrained weights to make inferences and opencv2 to manage frames.
     Included Features:
     1. Reading and writing of video file using  Opencv2
     2. Using pretrained model to make inferences on frames.

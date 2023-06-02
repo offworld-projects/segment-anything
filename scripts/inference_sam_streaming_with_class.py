@@ -14,12 +14,11 @@ class ImageSegmentationStreaming:
     2. Using pretrained model to make inferences on frames.
     3. Use the inferences to plot masks overlay with frames.
     """
-    def __init__(self, model_name, streaming_device=0, out_file="output/segmented_video.avi"):
+    def __init__(self, model_type, streaming_device=0, out_file="output/segmented_video.avi"):
+        # initialize segmentation model SAM
+        self.sam = ImageSegmentation(model_type=model_type)
         self.streaming_device = streaming_device
         self.out_file = out_file
-
-        # initialize segmentation model SAM
-        self.sam = ImageSegmentation(model_name=model_name)
 
     def get_device(self, device=0):
         # Function creates a streaming object to read the stream frame by frame.
@@ -29,7 +28,12 @@ class ImageSegmentationStreaming:
         return cap
 
     def __call__(self):
-        player = self.get_device(self.streaming_device) # create streaming service for application
+        # specify the object class to segment
+        classes = ["monitor", "keyboard", "cup", "person"]
+        print(f'object classes {classes}')
+
+        # create streaming service for application
+        player = self.get_device(self.streaming_device) 
         assert player.isOpened()
         x_shape = int(player.get(cv2.CAP_PROP_FRAME_WIDTH))
         y_shape = int(player.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -41,8 +45,7 @@ class ImageSegmentationStreaming:
         fps = 0
         tfc = int(player.get(cv2.CAP_PROP_FRAME_COUNT))
         tfcc = 0
-        classes = ["monitor", "keyboard", "cup", "person"]
-        print(f'object classes {classes}')
+        
         while True:
             fc += 1
             start_time = time.time()
@@ -61,14 +64,17 @@ class ImageSegmentationStreaming:
             end_time = time.time()
             fps += 1/np.round(end_time - start_time, 3)
             time.sleep(1.0)
+
             if fc == 10:
                 fps = int(fps / 10)
                 tfcc += fc
                 fc = 0
                 per_com = int(tfcc / tfc * 100)
                 print(f"Frames Per Second : {fps}")
+
             # out.write(out_frame)
             cv2.imshow('segmented frame', out_frame)
+
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         player.release()
@@ -82,7 +88,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='arguments for testing segment anything model')
-    parser.add_argument('--model_name', type=str, default='../checkpoints/sam_vit_l_0b3195.pth')
+    parser.add_argument('--model_type', type=str, default='vit_b')
     parser.add_argument('--streaming_device', type=int, default=0)
     args = parser.parse_args()
     main(args)
